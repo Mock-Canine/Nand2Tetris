@@ -1,43 +1,49 @@
-"""The utility module provides Parser, Evaler, SymbolTable classes and tool functions"""
+"""The utility module provides Parser, Evaler, SymbolTable classes, 
+three classes to represent instructions, tool functions"""
 
 import inspect
 import sys
 
 class Parser:
-    """A Parser provides next line of tokens as a list each time it is queried 
+    """A Parser provides an instance of one instruction each time it is queried 
     
-    Its constructor takes a file object
+    Its constructor takes an iterable containing lines of instructions
 
     >>> comment_space_line = ['\\n', '//comment\\n', '\t// comment\\n']
     >>> a_instruction = ['@i', '\t// comment', '\t@15//comment', '\t@15 // comment']
+    >>> l_instruction = ['(LOOP)', '0;JMP']
     >>> c_instruction = ['\tD', 'D=M+1', 'M-1;JEQ', 'M=D+1;JEQ // comment']
     >>> parser1 = Parser(comment_space_line)
     >>> print(parser1.advance())
     None
     >>> parser2 = Parser(a_instruction)
     >>> [parser2.advance() for i in range(4)]
-    [('A', 'i'), ('A', '15'), ('A', '15'), None]
-    >>> parser3 = Parser(c_instruction)
-    >>> [parser3.advance() for i in range(4)]
-    [('C', ['null', 'D', 'null']), ('C', ['D', 'M+1', 'null']), ('C', ['null', 'M-1', 'JEQ']), ('C', ['M', 'D+1', 'JEQ'])]
+    [(A, i), (A, 15), (A, 15), None]
+    >>> parser3 = Parser(l_instruction)
+    >>> [parser3.advance() for i in range(2)]
+    [(L, LOOP, 0), (C, [null, 0, JMP])]
+    >>> parser4 = Parser(c_instruction)
+    >>> [parser4.advance() for i in range(4)]
+    [(C, [null, D, null]), (C, [D, M+1, null]), (C, [null, M-1, JEQ]), (C, [M, D+1, JEQ])]
     """
     _WHITESPACE = ' \t\n\r'
 
     def __init__(self, source):
         self.source = iter(source)
         self.next_line = None
+        self.line_idx = 0 # used as the value of commandL
 
     def advance(self):
         if self.has_more_lines:
             pre_command = self.preprocess()
-            if pre_command is not None:
+            if pre_command:
                 return self.tokenlize(pre_command)
             return self.advance()
         return None
 
     @property
     def has_more_lines(self):
-        """This method updates the next_line attribute, and must be called before advance()""" 
+        """This method updates the next_line attribute"""
         try:
             self.next_line = next(self.source)
         except StopIteration:
@@ -45,44 +51,44 @@ class Parser:
         return True
 
     def preprocess(self):
-        """Return a tuple (command_type, command) for tokenlizing, comments and whitesapces excluded(return None)"""
-        command_type = None
+        """Get rid of comments and whitespaces. Empty lines and comment lines become '' """
         no_comment = self.next_line.split('/', 1)[0]
-        command = no_comment.strip(self._WHITESPACE)
-        if command:
-            if '@' in command:
-                command_type = 'A'
-            elif '(' in command:
-                command_type = 'L'
-            else:
-                command_type = 'C'
-            return command_type, command
+        return no_comment.strip(self._WHITESPACE)
     
     def tokenlize(self, command):
-        """Return a tuple (command_type, [token1, token2, ...])"""
-        if command[0] == 'A':
-            return command[0], command[1][1:]
+        """Return an instance of command A, L or C"""
+        if '@' in command:
+            self.line_idx += 1
+            return CommandA(command[1:])
+        elif '(' in command:
+            return CommandL(command[1:].rstrip(')'), self.line_idx) # commandL will not advance line_idx
         else:
             dest = "null"
-            jump = "null"
-            s = command[1]
-            if ";" in s:
-                s, jump = s.split(";", 1)
-            if "=" in s:
-                dest, comp = s.split("=", 1)
+            jmp = "null"
+            if ";" in command:
+                command, jmp = command.split(";", 1)
+            if "=" in command:
+                dest, comp = command.split("=", 1)
             else:
-                comp = s
-            return command[0], [dest, comp, jump]
+                comp = command
+            self.line_idx += 1
+            return CommandC(dest, comp, jmp)
 
 class Evaler:
-    """A Evaler converts the instructions into binary strings using the look-up table in the SymbolTable class or append new symbols in the table
+    """An Evaler converts the instructions into binary strings using the look-up table in the SymbolTable class or appends new symbols into the table
 
     >>> symboltable = SymbolTable()
     >>> evaler = Evaler(symboltable)
-    >>> a_command = ('A', '14')
+    >>> a_command = CommandA('i')
     >>> evaler.convert(a_command)
-    '0000000000001110'
-    >>> c_command = [('C', ['D', 'M+1', 'null']), ('C', ['null', 'M-1', 'JEQ']), ('C', ['M', 'D+1', 'JEQ'])]
+    '0000000000010000'
+    >>> evaler.convert(CommandA('sum'))
+    '0000000000010001'
+    >>> evaler.convert(CommandA('i'))
+    '0000000000010000'
+    >>> evaler.convert(CommandA('R0'))
+    '0000000000000000'
+    >>> c_command = [CommandC('D', 'M+1', 'null'), CommandC('null', 'M-1', 'JEQ'), CommandC('M', 'D+1', 'JEQ')]
     >>> [evaler.convert(i) for i in c_command]
     ['1111110111010000', '1111110010000010', '1110011111001010']
     """
@@ -91,13 +97,18 @@ class Evaler:
         self.symboltable = symboltable
 
     def convert(self, command):
-        if command[0] == 'A':
-            return str(format(int(command[1]), '016b'))   
-        else:
-            dest = self.symboltable.dest[command[1][0]]
-            comp = self.symboltable.comp[command[1][1]]
-            jmp = self.symboltable.jmp[command[1][2]]
-            return '111' + comp + dest + jmp
+        """Convert the command instance into binary strings"""
+        if isinstance(command, CommandA):
+            if command.value.isnumeric():
+                value = int(command.value)
+            else:
+                value = self.symboltable.retrieve(command)
+            return str(format(value, '016b'))   
+        return '111' + self.symboltable.retrieve(command) 
+
+    def populate(self, commandL):
+        """Populate the symboltable with commandL during first pass"""
+        self.symboltable.deposit(commandL)
 
 class SymbolTable:
     """A symboltable contains all the name-address pairs of symbols"""
@@ -127,6 +138,55 @@ class SymbolTable:
 
     def __init__(self):
         self.user_symbol = {}
+        self.address_index = 16
+
+    def retrieve(self, command):
+        """Return the address of components of commands, allocate the address from 16 if commandA  
+        represents a variable and should be initilized
+        """
+        if isinstance(command, CommandA):
+            value = command.value
+            if value in self.pre_defined:
+                return self.pre_defined[value]
+            elif value not in self.user_symbol:
+                self.user_symbol[value] = self.address_index
+                self.address_index += 1
+            return self.user_symbol[value]
+        else:
+            dest = self.dest[command.dest]
+            comp = self.comp[command.comp]
+            jmp = self.jmp[command.jmp]
+            return comp + dest + jmp
+
+    def deposit(self, commandL):
+        self.user_symbol[commandL.label] = commandL.value
+
+class CommandA:
+    """@value"""
+    def __init__(self, value: str):
+        self.value = value
+
+    def __repr__(self):
+        return f"(A, {self.value})"
+
+class CommandC:
+    """dest=comp;jmp"""
+    def __init__(self, dest, comp, jmp):
+        self.dest = dest
+        self.comp = comp
+        self.jmp = jmp
+
+    def __repr__(self):
+        return f"(C, [{self.dest}, {self.comp}, {self.jmp}])"
+
+class CommandL:
+    """(Xxx)"""
+    def __init__(self, label: str, value: int):
+        self.label = label
+        self.value = value
+
+    def __repr__(self):
+        return f"(L, {self.label}, {self.value})"
 
 def main(fn):
     """Call fn with command line arguments.  Used as a decorator.

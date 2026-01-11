@@ -1,17 +1,23 @@
-"""A HackAssembler and its REPL"""
+"""A HackAssembler"""
 
 from pathlib import Path
 from utility import *
 
 def assembler(parser, evaler):
-    """Read each line until an end of file"""
+    """First pass to process (Xxx) instructions and populate instances of instructions 
+    into the list, then convert the instructions into binary codes"""
+    instructions = []
     while True:
-        line = parser.advance()
-        if line is not None:
-            binary_line = evaler.convert(line)
-            yield binary_line 
+        command = parser.advance()
+        if command is not None:
+            if isinstance(command, CommandL):
+                evaler.populate(command)
+            else:
+                instructions.append(command)
         else:
             break
+    yield from map(evaler.convert, instructions)
+
 @main
 def run(*argv):
     import argparse
